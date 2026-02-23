@@ -1,0 +1,530 @@
+---
+title: "BJ5Ta_RNA_DESeq"
+author: "Joanna Yeung"
+date: "2025-06-20"
+output: html_document
+---
+```{r}
+library("msigdbr")
+library("DESeq2")
+library("gplots")
+library("RColorBrewer")
+library("pheatmap")
+library("gtools")
+library("dplyr")
+library("tibble")
+library("readxl")
+library("enrichR")
+library("fgsea")
+library("cowplot")
+```
+
+```{r}
+load("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/workspaces/genes_anno_type.RData")
+```
+
+# annotation colors for pheatmap
+```{r heatmap_colors}
+hm_cols_RNA <- list(
+                Treatment=c("Cycling"="#F8766D", "Doxo"="#B3C543", "Palbo"="#E0ADCD", "TNFa"="darkblue"), 
+                Cell_Cycle = c("Yes"="dark blue", "No"="white"), 
+                SASP = c("Yes"="dark green", "No"="white"),
+                p53_All=c("Yes"="#00B0F0", "No"="white"),
+                NFKB_All=c("Yes"="red", "No"="white"))
+```
+
+```{r}
+colors <- c("Cycling"="#F8766D", "Doxo"="#B3C543", "Palbo"="#E0ADCD", "TNFa"="darkblue") 
+```
+
+```{r}
+setwd("/lustre/fs4/risc_lab/scratch/jyeung/Different_Cell_Lines_NFkB_Profiling_PDvsDoxo_Jan2026/STAR_alignment")
+samples <- dir(pattern="ReadsPerGene.out.tab")
+samples <- samples[grepl("BJ-5Ta", samples)]
+samples <- samples[c(1:3,6:7,4:5,8,9:10)]
+samplenames <- gsub("_[0-9]{1,2}_ReadsPerGene.out.tab", "", samples)
+geneCounts <- lapply(samples, function(x){df <- read.table(x, skip=4)[ ,c(1,2)]
+                                          colnames(df) <- c("geneID", x)
+                                          return(df)})
+names(geneCounts) <- samplenames
+
+countsMatrix <- data.frame(geneID=geneCounts[[1]]$geneID)
+for(i in 1:length(geneCounts)){
+  countsMatrix <- merge(countsMatrix, geneCounts[[i]], by="geneID")
+}
+row.names(countsMatrix) <- countsMatrix$geneID
+countsMatrix <- countsMatrix[ ,-1]
+colnames(countsMatrix) <- samplenames
+metaData <- data.frame(Samples=names(geneCounts), Treatment=c(rep("Cycling",2),rep("Doxo",3), rep("Palbo",3), rep("TNFa",2)), 
+                       Biorep=factor(c(1,2,1,2,3,1,2,3,1,2)))
+
+BJ_RNAdds <- DESeqDataSetFromMatrix(countsMatrix, metaData, ~Biorep+Treatment)
+BJ_RNAdds <- estimateSizeFactors(BJ_RNAdds)
+
+rlog_BJ_RNAdds <- rlog(BJ_RNAdds)
+BJ_rlog_Mat <- assays(rlog_BJ_RNAdds)[[1]]
+row.names(BJ_rlog_Mat) <- gsub('\\.[0-9]*$', '', rownames(rlog_BJ_RNAdds))
+row.names(BJ_rlog_Mat) <- ifelse(genes_anno_type[match(row.names(BJ_rlog_Mat), genes_anno_type$ensembl_id), ]$gene_id %in% NA, row.names(BJ_rlog_Mat), genes_anno_type[match(row.names(BJ_rlog_Mat), genes_anno_type$ensembl_id), ]$gene_id)
+# need to save to pdf
+plot_grid(
+plotPCA(rlog_BJ_RNAdds, intgroup=c("Biorep")), 
+plotPCA(rlog_BJ_RNAdds, intgroup=c("Treatment"))
+)
+
+# Extract PCA data
+pcaData_allSamples <- plotPCA(rlog_BJ_RNAdds, intgroup = c("Treatment"))
+percentVar_allSamples <- round(100 * attr(pcaData_allSamples , "percentVar"))
+```
+
+# DESeq with LRT test
+```{r}
+# combine experimental design levels to make it easier to extract results for pairwise comparisons of samples
+keep <- rowSums(counts(BJ_RNAdds, normalized=T)) >= 1 # filter out rows with rowsum less than 1 to remove genes that aren't being expressed across samples. 
+BJ_RNAdds <- BJ_RNAdds[keep,]
+BJ_RNAddsallLRT <- DESeq(BJ_RNAdds, test="LRT", reduced=~Biorep) #perform DESeq
+#extract results from DESeq objects 
+
+# get DESeq results from LRT
+acrossBJ.Groups <- results(BJ_RNAddsallLRT)
+acrossBJ.Groups$SYMBOL <-  gsub('\\.[0-9]*$', '', row.names(acrossBJ.Groups))
+acrossBJ.Groups$SYMBOL <-  ifelse(genes_anno_type[match(acrossBJ.Groups$SYMBOL, genes_anno_type$ensembl_id), ]$gene_id %in% NA, acrossBJ.Groups$SYMBOL, genes_anno_type[match(acrossBJ.Groups$SYMBOL, genes_anno_type$ensembl_id), ]$gene_id)
+
+# filter for significant results (padj < 0.05)
+sigBJ.Groups <- acrossBJ.Groups[acrossBJ.Groups$padj < 0.05 & !is.na(acrossBJ.Groups$padj), ]
+
+sigBJ.Groups$SYMBOL <-  ifelse(genes_anno_type[match(sigBJ.Groups$SYMBOL, genes_anno_type$ensembl_id), ]$gene_id %in% NA, sigBJ.Groups$SYMBOL, genes_anno_type[match(sigBJ.Groups$SYMBOL, genes_anno_type$ensembl_id), ]$gene_id)
+
+sigBJ.Groups <- sigBJ.Groups[order(sigBJ.Groups$padj), ]
+```
+
+```{r}
+BJ_RNAdds <- DESeq(BJ_RNAdds)
+LFCResults_BJ_RNA <- list()
+# comparison with Cycling as control
+for(i in 1:3){
+LFCResults_BJ_RNA[[i]] <- results(BJ_RNAdds, contrast=c("Treatment", as.character(levels(BJ_RNAdds$Treatment)[i+1]), as.character(levels(BJ_RNAdds$Treatment)[1])))
+                                       
+row.names(LFCResults_BJ_RNA[[i]]) <- gsub('\\.[0-9]*$', '', row.names(LFCResults_BJ_RNA[[i]]))
+
+LFCResults_BJ_RNA[[i]]$SYMBOL <-  ifelse(genes_anno_type[match(row.names(LFCResults_BJ_RNA[[i]]), genes_anno_type$ensembl_id), ]$gene_id %in% NA, row.names(LFCResults_BJ_RNA[[i]]), genes_anno_type[match(row.names(LFCResults_BJ_RNA[[i]]), genes_anno_type$ensembl_id), ]$gene_id)
+
+names(LFCResults_BJ_RNA)[[i]] <- paste(as.character(levels(BJ_RNAdds$Treatment)[i+1]), "vs", as.character(levels(BJ_RNAdds$Treatment)[1]))
+}
+```
+
+# filter for significant results with absolute log2FC > 1 across all pairwise comparisons between groups. 
+```{r}
+sigLFCResults_BJ_RNA <- list()
+for(i in 1:length(LFCResults_BJ_RNA)){
+  sigLFCResults_BJ_RNA[[i]] <- LFCResults_BJ_RNA[[i]][LFCResults_BJ_RNA[[i]]$SYMBOL %in% sigBJ.Groups$SYMBOL& abs(LFCResults_BJ_RNA[[i]]$log2FoldChange) >= 1, ]
+  sigLFCResults_BJ_RNA[[i]]$LRT_padj <- acrossBJ.Groups[match(row.names(sigLFCResults_BJ_RNA[[i]]), row.names(acrossBJ.Groups)), ]$padj
+}
+names(sigLFCResults_BJ_RNA) <- names(LFCResults_BJ_RNA)
+
+# get list of genes with absolute log2FC > 1 increase relative to controls by extracting unique genes from sigLFCResults
+sig.BJ.Genes <- list()
+for(i in 1:length(sigLFCResults_BJ_RNA)){
+sig.BJ.Genes[[i]] <- sigLFCResults_BJ_RNA[[i]]$SYMBOL
+}
+sig.BJ.Genes <- unique(unlist(sig.BJ.Genes))
+
+```
+
+# download msigdb databases
+```{r}
+# msigdb Hmark database
+msigdbr_df_H <- as.data.frame(msigdbr(species = "Homo sapiens", collection="H"))
+msigdbr_t2g_H = msigdbr_df_H %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+msigdbr_t2g_H$gs_name <- sub("HMARK_", "", msigdbr_t2g_H$gs_name)
+msigdbr_t2g_H$gs_name <- gsub("_", " ", msigdbr_t2g_H$gs_name)
+
+# msigdb KEGG pathway database
+msigdbr_df_KEGG <- as.data.frame(msigdbr(species = "Homo sapiens", collection="C2", subcollection ="KEGG_MEDICUS"))
+msigdbr_t2g_KEGG = msigdbr_df_KEGG %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+msigdbr_t2g_KEGG$gs_name <- sub("KEGG_", "", msigdbr_t2g_KEGG$gs_name)
+msigdbr_t2g_KEGG$gs_name <- gsub("_", " ", msigdbr_t2g_KEGG$gs_name)
+
+# msigdb Reactome database
+msigdbr_df_REACT <- as.data.frame(msigdbr(species = "Homo sapiens", collection="C2", subcollection="CP:REACTOME"))
+msigdbr_t2g_REACT = msigdbr_df_REACT %>% dplyr::distinct(gs_name, gene_symbol) %>% as.data.frame()
+msigdbr_t2g_REACT$gs_name <- sub("REACTOME_", "", msigdbr_t2g_REACT$gs_name)
+msigdbr_t2g_REACT$gs_name <- gsub("_", " ", msigdbr_t2g_REACT$gs_name)
+```
+
+# load SASP gene list
+```{r}
+# SASP genes database downloaded from Wang et al, EMBO 2022. 
+Wang_etal_SASP <- as.data.frame(read_excel("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_1/RNAseq/post_kallisto_analysis/Other_Resources/embj2021108946-sup-0003-tableev2.xlsx"))
+Wang_etal_SASP <- genes_anno_type[match(Wang_etal_SASP$p53, genes_anno_type$gene_id), ] %>% dplyr::distinct(gene_id, ensembl_id, entrezid)
+Wang_etal_SASP$Type <- ifelse(Wang_etal_SASP$gene_id %in% unlist(strsplit("BMP2\nLIPG\nIL1A\nAPOE\nC3\nB2M\nCCL2\nCCL5\nCXCL14\nCXCL16\nCXCL2\nCXCL8\nEBI3\nF8\nFas\nIL18\nIL1B\nIL6\nNRG1\nPENK\nSAA1\nTNC\nTNFSF15\nVEGFC\nMMP3\nBDNF\nMMP1\nKISS1\nFN1\nEDN1\nPLAU\nIL11\nCXCL1", "\n")), "NF-KB", "")
+
+Wang_etal_SASP$Type <- ifelse(Wang_etal_SASP$gene_id %in% unlist(strsplit("VGF\nAPOD\nCEACAM1\nCPE\nNTN1\nGDF15\nAGT\nLAMA3\nCLCA2\nPLA2G15\nISG15\nLIF\nMR1\nPLTP\nTSKU\nPLAT\nLYNX1\nTGFB2\nTGFA\nAGRN\nTGFBI\nVWCE\nIGFBP3\nGAS6\nPCSK5\nPLXNB1\nHBEGF\nABHD15\nLAMC1\nMFGE8\nPGF\nWNT9A\nVCAN\nTIMP3", "\n")), "p53", ifelse(Wang_etal_SASP$gene_id %in% unlist(strsplit("BMP2\nLIPG\nIL1A\nAPOE\nC3\nB2M\nCCL2\nCCL5\nCXCL14\nCXCL16\nCXCL2\nCXCL8\nEBI3\nF8\nFas\nIL18\nIL1B\nIL6\nNRG1\nPENK\nSAA1\nTNC\nTNFSF15\nVEGFC\nMMP3\nBDNF\nMMP1\nKISS1\nFN1\nEDN1\nPLAU\nIL11\nCXCL1", "\n")), "NF-KB", ""))
+
+# SASP genes from Gleason et al, Clincal Cancer Research
+Gleason_etal_SASP <- as.data.frame(read_excel("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/external_databases/Gleason_etal_ClinicalCancerRes2024_SASPList_supplementary_table_s6.xlsx",col_names = FALSE))
+
+# SASP genes from SASP Atlas
+SASP_Atlas_sigMat <- read.table("/lustre/fs4/risc_lab/scratch/jyeung/BJ_Lauren_bulkRNAseq2022_analysis/databases/SASP_Atlas.csv", sep=",", header=T)
+
+# merge all sources of SASP genes into a single vector
+SASP_all <- unique(c(as.character(SASP_Atlas_sigMat$Genes), Gleason_etal_SASP$...1, Wang_etal_SASP$gene_id))
+```
+
+# load p53 & NF-kB target genes list 
+```{r}
+# import p53 census target gene database from https://tp53.isb-cgc.org/target_genes
+Fischer_Oncogene_2017_p53_census_target_genes <- read_excel("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/external_databases/Fischer_Oncogene_2017_p53_census_target_genes.xlsx")
+
+# import Gilmore Lab's list of NF-kB target genes
+Gilmore_NFKB_Targets <- as.data.frame(read_excel("/lustre/fs4/risc_lab/scratch/jyeung/LS_PDvsDoxo_2/RNAseq/external_databases/GilmoreLab_NFKB_Target_Genes_BostonUniversity.xlsx"))$`Human Gene Name`
+Gilmore_NFKB_Targets <- unique(Gilmore_NFKB_Targets[!is.na(Gilmore_NFKB_Targets)])
+
+# extract genes under Hallmark terms P53 PATHWAY & TNFA SIGNALING VIA NFKB
+p53_Hallmark <- msigdbr_df_H[msigdbr_df_H$gs_name %in% "HALLMARK_P53_PATHWAY", ]$gene_symbol
+NFKB_Hallmark <- msigdbr_df_H[msigdbr_df_H$gs_name %in% "HALLMARK_TNFA_SIGNALING_VIA_NFKB", ]$gene_symbol
+```
+
+# annotate genes
+```{r}
+BJ.anno_genes <- data.frame(row.names=unique(sigBJ.Groups$SYMBOL))
+
+BJ.anno_genes$Cell_Cycle <- ifelse(row.names(BJ.anno_genes) %in% c(msigdbr_df_H[msigdbr_df_H$gs_name %in% c("HALLMARK_E2F_TARGETS", "HALLMARK_G2M_CHECKPOINT"), ]$gene_symbol, msigdbr_df_REACT[msigdbr_df_REACT$gs_name %in% c("REACTOME_CELL_CYCLE", "REACTOME_CELL_CYCLE_CHECKPOINTS", "REACTOME_CELL_CYCLE_MITOTIC"), ]$gene_symbol, msigdbr_df_KEGG[msigdbr_df_KEGG$gs_name %in% "KEGG_CELL_CYCLE", ]$gene_symbol), "Yes", "No")
+
+# add annotation to if genes are SASP
+BJ.anno_genes$SASP <- ifelse(row.names(BJ.anno_genes) %in% SASP_all, "Yes", "No")
+
+# add annotation to significant genes based on if they are NF-kB or p53 targets.
+BJ.anno_genes$NFKB_All <- ifelse(row.names(BJ.anno_genes) %in% c(Gilmore_NFKB_Targets, NFKB_Hallmark, Wang_etal_SASP[Wang_etal_SASP$Type %in% "NF-KB", ]$gene_id), "Yes", "No") 
+BJ.anno_genes$p53_All <- ifelse(row.names(BJ.anno_genes) %in% c(Fischer_Oncogene_2017_p53_census_target_genes$`Gene Symbol`, p53_Hallmark, Wang_etal_SASP[Wang_etal_SASP$Type %in% "p53", ]$gene_id), "Yes", "No")
+
+# extract rlog counts of sig changing genes
+BJ.sigMat_0.05 <- BJ_rlog_Mat[row.names(BJ_rlog_Mat) %in% sig.BJ.Genes, ]
+```
+
+# plot heatmap of sig genes in BJ
+```{r}
+BJ.annoCol <- as.data.frame(colData(BJ_RNAdds))
+pdf_dir <- "/lustre/fs4/risc_lab/scratch/jyeung/Different_Cell_Lines_NFkB_Profiling_PDvsDoxo_Jan2026/post_STAR_alignment_analysis/Figures"
+```
+```{r}
+pdf(paste0(pdf_dir, "/BJ.sigMat_0.05.log2FCover1.pdf"))
+bad_rows <- apply(BJ.sigMat_0.05, 1, function(x) {
+  any(is.na(x) | is.nan(x) | is.infinite(x)) || sd(x) == 0
+})
+
+BJ.sigMat_clean <- BJ.sigMat_0.05[!bad_rows, ]
+pheatmap(BJ.sigMat_clean, scale="row", cluster_cols = F, cluster_rows = T, show_rownames = F, annotation_row = BJ.anno_genes, annotation_col=BJ.annoCol[ ,2:3] , annotation_colors = hm_cols_RNA, breaks=seq(-2.5, 2.5, length.out = 100))
+dev.off()
+# plot NFkB target genes
+pdf(paste0(pdf_dir, "/BJ.sigMat_0.05.log2FCover1.NFKBtargets.pdf"), height=14)
+pheatmap(BJ.sigMat_0.05[row.names(BJ.sigMat_0.05) %in% row.names(BJ.anno_genes[BJ.anno_genes$NFKB_All %in% "Yes", ]), ], scale = "row",  cluster_cols = F, cluster_rows = T, show_rownames = T, annotation_row = BJ.anno_genes, annotation_col=BJ.annoCol[ ,2:3] , annotation_colors = hm_cols_RNA, breaks=seq(-2.5, 2.5, length.out = 100))
+dev.off()
+```
+
+# compare NFkB target genes changing in BJs vs LS8817s
+```{r}
+# load workspace that contains RNA-seq analysis in LS8817s
+load("/lustre/fs4/risc_lab/scratch/jyeung/Manuscript_Figures/Figure2/workspace.RData")
+# add annotation to significant genes based on if they are NF-kB or p53 targets. 
+clusterDF$NFKB_All <- ifelse(clusterDF$gene_id %in% c(Gilmore_NFKB_Targets, NFKB_Hallmark, IPA_targets$NFKB), "Yes", "No") # annotate sig genes as NF-kB targets if they are part of Gilmore_NFKB_Targets or TNFA SIGNALING VIA NFKB Hallmark term 
+clusterDF$p53_All <- ifelse(clusterDF$gene_id %in% c(Fischer_Oncogene_2017_p53_census_target_genes$`Gene Symbol`, p53_Hallmark), "Yes", "No")
+
+LS8817_NFkB <- list(Palbo=clusterDF[clusterDF$Clusters %in% c("7", "1") & clusterDF$NFKB_All %in% "Yes", ],
+                    Doxo=clusterDF[clusterDF$Clusters %in% c("4", "6") & clusterDF$NFKB_All %in% "Yes", ], 
+                    Shared=clusterDF[clusterDF$Clusters %in% "3" & clusterDF$NFKB_All %in% "Yes", ]
+)
+BJ_NFkB <- lapply(sigLFCResults_BJ_RNA, function(x){x[x$SYMBOL %in% row.names(BJ.anno_genes[BJ.anno_genes$NFKB_All %in% "Yes", ]) & x$log2FoldChange >0, ]$SYMBOL})
+```
+
+# RNA-seq: plot venn diagram showing overlap of NF-kB target genes going up in LS8817 vs BJ cells
+```{r}
+# write function to create venn diagrams that are proportional to size of each category. 
+create_proportional_venn <- function(sets, set_labels, colors = c("#E0ADCD", "#B3C543", "#A0ADCD")) {
+  library(eulerr)
+  # Check if sets and labels are provided correctly
+  if (length(sets) != length(set_labels)) {
+    stop("The number of sets and set_labels must be the same.")
+  }
+  
+  # Prepare the data for eulerr
+  venn_data <- sets
+  names(venn_data) <- set_labels
+  
+  # Use eulerr to calculate the Venn diagram
+  venn_fit <- euler(venn_data)
+  
+  # Plot the Venn diagram
+  plot(venn_fit, 
+       fills = colors, 
+       labels = list(cex = 1, fontfamily = "Helvetica"),
+       quantities = list(cex = 1),
+       edges = list(lwd = 2))
+}
+```
+
+# get list of genes in the venn diagram overlap
+```{r}
+get_intersections_named <- function(sets) {
+  n <- length(sets)
+  set_names <- names(sets)
+  
+  if (is.null(set_names)) {
+    stop("Please provide named sets (e.g., list(A=..., B=...))")
+  }
+  
+  all_combinations <- unlist(
+    lapply(1:n, function(x) combn(n, x, simplify = FALSE)),
+    recursive = FALSE
+  )
+  
+  result <- list()
+  
+  for (combo in all_combinations) {
+    
+    combo_names <- set_names[combo]
+    name <- paste(combo_names, collapse = "&")
+    
+    intersect_genes <- Reduce(intersect, sets[combo])
+    
+    other_sets <- setdiff(seq_len(n), combo)
+    if (length(other_sets) > 0) {
+      other_genes <- unique(unlist(sets[other_sets]))
+      intersect_genes <- setdiff(intersect_genes, other_genes)
+    }
+    
+    # 🔥 skip empty overlaps
+    if (length(intersect_genes) == 0) next
+    
+    df <- data.frame(
+      gene_id = intersect_genes,
+      intersect_cat = name,
+      stringsAsFactors = FALSE
+    )
+    
+    result[[name]] <- df
+  }
+  
+  result_df <- do.call(rbind, result)
+  rownames(result_df) <- NULL
+  
+  return(result_df)
+}
+```
+```{r}
+venn_data_shared <- list(LS8817_Doxo=LS8817_NFkB$Doxo$gene_id, BJ_Doxo14=BJ_NFkB$`Doxo vs Cycling`,BJ_TNFa=BJ_NFkB$`TNFa vs Cycling`)
+LS8817vsBJ_Doxo.df <- get_intersections_named(venn_data_shared)
+LS8817vsBJ_Doxo.df$SASP <- ifelse(LS8817vsBJ_Doxo.df$gene_id %in% row.names(BJ.anno_genes[BJ.anno_genes$SASP %in% "Yes", ]), "1", "0")
+
+
+pdf(paste0(pdf_dir, "/LS8817vsBJ_Doxo.NFKB.genes_vennDiagram.pdf"), width=4, height=10)
+create_proportional_venn(sets=venn_data_shared, 
+                         set_labels = c("LS8817 Doxo", "BJ Doxo", "BJ +TNFa"), 
+                         colors = c("#B3C543","#D1DC8E",  "darkblue")
+)
+ggplot(LS8817vsBJ_Doxo.df[!LS8817vsBJ_Doxo.df$intersect_cat %in% unique(LS8817vsBJ_Doxo.df$intersect_cat)[1:4], ],
+       aes(x = intersect_cat,
+           y = gene_id,
+           color = SASP,
+           label = gene_id)) +
+  geom_text(size = 3) +
+  facet_wrap(~intersect_cat, scales="free")+
+  scale_color_manual(values = c("0" = "black", "1" = "darkgreen")) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(), 
+    legend.position = "none"
+  ) +
+  labs(x = "", y = "")
+dev.off()
+```
+```{r}
+pdf(paste0(pdf_dir, "/LS8817vsBJ_Palbo_NFKB.genes_vennDiagram.pdf"), width=4, height=10)
+venn_data_shared <- list(LS8817_Palbo=LS8817_NFkB$Palbo$gene_id, BJ_Palbo=BJ_NFkB$`Palbo vs Cycling`, BJ_TNFa=BJ_NFkB$`TNFa vs Cycling`)
+create_proportional_venn(sets=venn_data_shared, 
+                         set_labels = c("LS8817 Palbo", "BJ Palbo", "BJ +TNFa"), 
+                         colors = c("#E0ADCD", "#ECCEE1" ,"darkblue") 
+)
+LS8817vsBJ_Palbo.df <- get_intersections_named(venn_data_shared)
+LS8817vsBJ_Palbo.df$SASP <- ifelse(LS8817vsBJ_Palbo.df$gene_id %in% row.names(BJ.anno_genes[BJ.anno_genes$SASP %in% "Yes", ]), "1", "0")
+
+ggplot(LS8817vsBJ_Palbo.df[!LS8817vsBJ_Palbo.df$intersect_cat %in% unique(LS8817vsBJ_Palbo.df$intersect_cat)[1:4], ],
+       aes(x = intersect_cat,
+           y = gene_id,
+           color = SASP,
+           label = gene_id)) +
+  geom_text(size = 3) +
+  facet_wrap(~intersect_cat, scales="free")+
+  scale_color_manual(values = c("0" = "black", "1" = "darkgreen")) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(), 
+    legend.position = "none"
+  ) +
+  labs(x = "", y = "")
+dev.off()
+```
+
+```{r}
+pdf(paste0(pdf_dir, "/LS8817vsBJ_Shared_NFKB.genes_vennDiagram.pdf"), width=4, height=15)
+venn_data_shared <- list(LS8817_Shared=LS8817_NFkB$Shared$gene_id, BJ_Palbo=BJ_NFkB$`Palbo vs Cycling`, BJ_Doxo=BJ_NFkB$`Doxo vs Cycling`)
+create_proportional_venn(sets=venn_data_shared, 
+                         set_labels = c("LS8817 Shared", "BJ Palbo", "BJ Doxo"), 
+                         colors = c("#E5C494",  "#ECCEE1" , "#D1DC8E") 
+)
+LS8817vsBJ_Shareddf <- get_intersections_named(venn_data_shared)
+LS8817vsBJ_Shareddf$SASP <- ifelse(LS8817vsBJ_Shareddf$gene_id %in% row.names(BJ.anno_genes[BJ.anno_genes$SASP %in% "Yes", ]), "1", "0")
+
+ggplot(LS8817vsBJ_Shareddf[!LS8817vsBJ_Shareddf$intersect_cat %in% unique(LS8817vsBJ_Shareddf$intersect_cat)[1:4], ],
+       aes(x = intersect_cat,
+           y = gene_id,
+           color = SASP,
+           label = gene_id)) +
+  geom_text(size = 3) +
+  facet_wrap(~intersect_cat, scales="free")+
+  scale_color_manual(values = c("0" = "black", "1" = "darkgreen")) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(), 
+    legend.position = "none"
+  ) +
+  labs(x = "", y = "")
+
+venn_data_shared <- list(BJ_Palbo=BJ_NFkB$`Palbo vs Cycling`, BJ_Doxo=BJ_NFkB$`Doxo vs Cycling`)
+create_proportional_venn(sets=venn_data_shared, 
+                         set_labels = c("BJ Palbo", "BJ Doxo"), 
+                         colors = c("#ECCEE1" , "#D1DC8E") 
+)
+dev.off()
+```
+# make matrix of normalized counts across drug & time. 
+```{r}
+NormCountsMat <- counts(BJ_RNAdds, normalized=T)
+# convert row names of matrix of normalized counts of off to on genes to gene symbol format. If there is no gene symbol format, keep ensembl format. 
+row.names(NormCountsMat) <- gsub('\\.[0-9]*$', '', row.names(NormCountsMat))
+row.names(NormCountsMat) <- ifelse(genes_anno_type[match(row.names(NormCountsMat), genes_anno_type$ensembl_id), ]$gene_id %in% NA, row.names(NormCountsMat), genes_anno_type[match(row.names(NormCountsMat), genes_anno_type$ensembl_id), ]$gene_id)
+write.csv(NormCountsMat, file="/lustre/fs4/risc_lab/scratch/jyeung/Different_Cell_Lines_NFkB_Profiling_PDvsDoxo_Jan2026/post_STAR_alignment_analysis/BJ_HS_RNA_NormalizedCounts.csv")
+
+# convert matrix of normalized counts of off to on genes into a dataframe with metaData information for ggplot to accept
+NormCounts_df <- list()
+for(i in 1:nrow(NormCountsMat)){
+NormCounts_df[[i]] <- data.frame(Counts=NormCountsMat[i, ], sample=names((NormCountsMat[i, ])), Transcript= row.names(NormCountsMat)[i], metaData)
+}
+NormCounts_df <- do.call(rbind, NormCounts_df) # combine list into 1 giant dataframe
+```
+
+```{r}
+NormCounts_df$Timepoint <- as.numeric(as.character(NormCounts_df$Timepoint))
+# save plot to pdf
+pdf(file="/lustre/fs4/risc_lab/scratch/jyeung/Different_Cell_Lines_NFkB_Profiling_PDvsDoxo_Jan2026/post_STAR_alignment_analysis/RNA_NormCountsMat_SASP.pdf", width=8, height=2)
+
+ggplot(NormCounts_df[NormCounts_df$Transcript %in% row.names(anno_genes[anno_genes$NFKB_All %in% "Yes" & anno_genes$SASP %in% "Yes", ]) & !NormCounts_df$Treatment %in% "TNFa", ], aes(x=Timepoint, y=Counts, color=Treatment, shape=Biorep))+geom_point(size=3)+scale_color_manual(values=hm_cols_RNA$Treatment)+
+facet_wrap(~Transcript, scales="free")+
+ylab("Normalized Counts")+xlab("Length of Treatment (days)")+
+  ggtitle("")+
+  scale_y_continuous(n.breaks=5)+scale_x_continuous(n.breaks=5)+
+  theme_classic()+theme(
+      axis.text.x = element_text(size = 8),
+      axis.text.y = element_text(size = 8),
+      axis.title.y = element_text(size = 10), 
+      axis.title.x = element_text(size = 10)
+)
+
+ggplot(NormCounts_df[NormCounts_df$Transcript %in% c("IL1A", "IL1B", "IL6"), ], aes(x=Timepoint, y=Counts, color=Treatment, shape=Biorep))+geom_point(size=3)+scale_color_manual(values=hm_cols_RNA$Treatment)+
+facet_wrap(~Transcript, scales="free")+
+ylab("Normalized Counts")+xlab("Length of Treatment (days)")+
+  ggtitle("")+
+  scale_y_continuous(n.breaks=5)+scale_x_continuous(n.breaks=5)+
+  theme_classic()+theme(
+      axis.text.x = element_text(size = 8),
+      axis.text.y = element_text(size = 8),
+      axis.title.y = element_text(size = 10), 
+      axis.title.x = element_text(size = 10)
+)
+
+dev.off()
+```
+
+# RNA-seq: GSEA Analysis 
+```{r RNAseq GSEA analysis}
+ranked_res_forGSEA <- list()
+
+for(i in 1:length(LFCResults_BJ_RNA)){
+  
+  rank <- LFCResults_BJ_RNA[[i]]
+  
+  # Fix NA p-values
+  rank$pvalue[is.na(rank$pvalue)] <- 1
+  
+  # Avoid Inf
+  rank$pvalue[rank$pvalue == 0] <- 1e-300
+  
+  # Remove NA logFC
+  rank <- rank[!is.na(rank$log2FoldChange), ]
+  
+  # Compute ranking metric
+  rank$rank_metric <- sign(rank$log2FoldChange) * -log10(rank$pvalue)
+  
+  # Remove non-finite values
+  rank <- rank[is.finite(rank$rank_metric), ]
+  
+  # Sort
+  rank <- rank[order(rank$rank_metric, decreasing = TRUE), ]
+  
+  # Create named vector
+  ranked_res_forGSEA[[i]] <- rank$rank_metric
+  names(ranked_res_forGSEA[[i]]) <- rownames(rank)
+  
+  # Convert to Entrez IDs
+  entrez_ids <- make.unique(
+    genes_anno_type[match(names(ranked_res_forGSEA[[i]]),
+                          genes_anno_type$ensembl_id), ]$entrezid
+  )
+  
+  names(ranked_res_forGSEA[[i]]) <- ifelse(
+    is.na(entrez_ids),
+    names(ranked_res_forGSEA[[i]]),
+    entrez_ids
+  )
+  
+  # 🔥 Remove NA names (GSEA will crash otherwise)
+  valid <- !is.na(names(ranked_res_forGSEA[[i]]))
+  ranked_res_forGSEA[[i]] <- ranked_res_forGSEA[[i]][valid]
+}
+
+# run GSEA analysis using: 
+GSEA_Results_H <- list() # msigdb Hallmark database
+for(i in 1:length(ranked_res_forGSEA)){
+ GSEA_Results_H[[i]] <- GSEA(ranked_res_forGSEA[[i]], TERM2GENE = msigdbr_t2g_H) 
+}
+
+names(GSEA_Results_H) <- names(LFCResults_BJ_RNA)
+```
+
+```{r}
+# Get padj value of GSEA result for TNFA SIGNALING VIA NFKB pathway to add onto GSEA plots
+GSEA_padj <- list(GSEA_Results_H$`Doxo vs Cycling`@result[GSEA_Results_H$`Doxo vs Cycling`@result$ID %in% "TNFA SIGNALING VIA NFKB", ]$p.adjust, 
+                  GSEA_Results_H$`Palbo vs Cycling`@result[GSEA_Results_H$`Palbo vs Cycling`@result$ID %in% "TNFA SIGNALING VIA NFKB", ]$p.adjust, 
+                  GSEA_Results_H$`TNFa vs Cycling`@result[GSEA_Results_H$`TNFa vs Cycling`@result$ID %in% "TNFA SIGNALING VIA NFKB", ]$p.adjust)
+                  
+GSEA_padj <- lapply(GSEA_padj, function(x){format(round(x, 6), nsmall = 4)}) # round to 4 decimal places 
+
+p1 <- gseaplot(GSEA_Results_H$`Doxo vs Cycling`, geneSetID = "TNFA SIGNALING VIA NFKB", by="runningScore", title = "Doxo vs Cycling: TNFA SIGNALING VIA NFKB", color.line="#D1DC8E", color="#D1DC8E", color.vline="#D1DC8E")+theme_classic()+ylim(-0.2, 0.8)+annotate("text", x = 30000, y = 0.8, label = paste0("padj=", GSEA_padj[[1]]))
+
+p3 <- gseaplot(GSEA_Results_H$`Palbo vs Cycling`, geneSetID = "TNFA SIGNALING VIA NFKB", by="runningScore", title = "Palbo vs Cycling: TNFA SIGNALING VIA NFKB", color="#ECCEE1", color.line="#ECCEE1", color.vline="#ECCEE1")+theme_classic()+ylim(-0.2, 0.8)+annotate("text", x = 30000, y = 0.8, label = paste0("padj=", GSEA_padj[[2]]))
+
+p5 <- gseaplot(GSEA_Results_H$`TNFa vs Cycling`, geneSetID = "TNFA SIGNALING VIA NFKB", by="runningScore", title = "+TNFa vs Untreated: TNFA SIGNALING VIA NFKB", color="darkblue", color.line="darkblue", color.vline="darkblue")+theme_classic()+ylim(-0.2, 0.95)+annotate("text", x = 30000, y = 0.8, label = paste0("padj=", GSEA_padj[[3]]))
+
+pdf(paste0(pdf_dir, "/BJ_HS_GSEA_plots_Hallmark_TNFA.pdf"), width=5, height=4)
+p1
+p3
+p5
+dev.off()
+```
+
+
