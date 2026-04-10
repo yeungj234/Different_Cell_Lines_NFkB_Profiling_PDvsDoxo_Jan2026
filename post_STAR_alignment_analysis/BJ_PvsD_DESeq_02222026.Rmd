@@ -127,7 +127,7 @@ for(i in 1:length(sigLFCResults_BJ_RNA)){
 sig.BJ.Genes[[i]] <- sigLFCResults_BJ_RNA[[i]]$SYMBOL
 }
 sig.BJ.Genes <- unique(unlist(sig.BJ.Genes))
-
+as.data.frame(colData(BJ_RNAdds))
 ```
 
 # download msigdb databases
@@ -321,7 +321,7 @@ create_proportional_venn(sets=venn_data_shared,
                          set_labels = c("LS8817 Doxo", "BJ Doxo", "BJ +TNFa"), 
                          colors = c("#B3C543","#D1DC8E",  "darkblue")
 )
-ggplot(LS8817vsBJ_Doxo.df[!LS8817vsBJ_Doxo.df$intersect_cat %in% unique(LS8817vsBJ_Doxo.df$intersect_cat)[1:4], ],
+ggplot(LS8817vsBJ_Doxo.df,
        aes(x = intersect_cat,
            y = gene_id,
            color = SASP,
@@ -349,7 +349,7 @@ create_proportional_venn(sets=venn_data_shared,
 LS8817vsBJ_Palbo.df <- get_intersections_named(venn_data_shared)
 LS8817vsBJ_Palbo.df$SASP <- ifelse(LS8817vsBJ_Palbo.df$gene_id %in% row.names(BJ.anno_genes[BJ.anno_genes$SASP %in% "Yes", ]), "1", "0")
 
-ggplot(LS8817vsBJ_Palbo.df[!LS8817vsBJ_Palbo.df$intersect_cat %in% unique(LS8817vsBJ_Palbo.df$intersect_cat)[1:4], ],
+ggplot(LS8817vsBJ_Palbo.df,
        aes(x = intersect_cat,
            y = gene_id,
            color = SASP,
@@ -378,7 +378,7 @@ create_proportional_venn(sets=venn_data_shared,
 LS8817vsBJ_Shareddf <- get_intersections_named(venn_data_shared)
 LS8817vsBJ_Shareddf$SASP <- ifelse(LS8817vsBJ_Shareddf$gene_id %in% row.names(BJ.anno_genes[BJ.anno_genes$SASP %in% "Yes", ]), "1", "0")
 
-ggplot(LS8817vsBJ_Shareddf[!LS8817vsBJ_Shareddf$intersect_cat %in% unique(LS8817vsBJ_Shareddf$intersect_cat)[1:4], ],
+ggplot(LS8817vsBJ_Shareddf,
        aes(x = intersect_cat,
            y = gene_id,
            color = SASP,
@@ -400,6 +400,26 @@ create_proportional_venn(sets=venn_data_shared,
                          set_labels = c("BJ Palbo", "BJ Doxo"), 
                          colors = c("#ECCEE1" , "#D1DC8E") 
 )
+
+BJ_Shareddf <- get_intersections_named(venn_data_shared)
+BJ_Shareddf$SASP <- ifelse(BJ_Shareddf$gene_id %in% row.names(BJ.anno_genes[BJ.anno_genes$SASP %in% "Yes", ]), "1", "0")
+
+ggplot(BJ_Shareddf,
+       aes(x = intersect_cat,
+           y = gene_id,
+           color = SASP,
+           label = gene_id)) +
+  geom_text(size = 3) +
+  facet_wrap(~intersect_cat, scales="free")+
+  scale_color_manual(values = c("0" = "black", "1" = "darkgreen")) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(), 
+    legend.position = "none"
+  ) +
+  labs(x = "", y = "")
 dev.off()
 ```
 # make matrix of normalized counts across drug & time. 
