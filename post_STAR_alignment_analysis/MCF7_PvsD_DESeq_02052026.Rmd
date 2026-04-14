@@ -603,6 +603,20 @@ ylab("Normalized Counts")+xlab("Length of Treatment (days)")+
 )
 
 dev.off()
+
+pdf("/lustre/fs4/risc_lab/scratch/jyeung/Different_Cell_Lines_NFkB_Profiling_PDvsDoxo_Jan2026/post_STAR_alignment_analysis/Figures/MCF7.Linker_Histone_RNA.levels.pdf")
+ggplot(NormCounts_df[grepl("^H1-[0-9]$|^H1-10$", NormCounts_df$Transcript) & !NormCounts_df$Treatment %in% "TNFa", ], aes(x=Timepoint, y=Counts, color=Treatment, shape=Biorep))+geom_point(size=3)+scale_color_manual(values=hm_cols_RNA$Treatment)+
+facet_wrap(~Transcript, scales="free")+
+ylab("Normalized Counts")+xlab("Length of Treatment (days)")+
+  ggtitle("")+
+  scale_y_continuous(n.breaks=5)+scale_x_continuous(n.breaks=5)+
+  theme_classic()+theme(
+      axis.text.x = element_text(size = 8),
+      axis.text.y = element_text(size = 8),
+      axis.title.y = element_text(size = 10), 
+      axis.title.x = element_text(size = 10)
+)
+dev.off()
 ```
 
 # G&D resubmission: 4-05-2026 venn diagram with MCF7 HS 
